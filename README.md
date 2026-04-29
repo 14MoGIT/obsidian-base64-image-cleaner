@@ -1,8 +1,6 @@
 # Base64 Image Cleaner
 
-![Demo](demo.gif)
-
-An Obsidian plugin that finds inline base64-embedded images in the current note and either replaces them with placeholder text or deletes them entirely.
+An Obsidian plugin that finds inline base64-embedded images in the current note and lets you replace, delete, shrink, or save them to file — with full undo support.
 
 Matches any markdown image whose source is a `data:image/...;base64,...` URI:
 
@@ -28,16 +26,25 @@ Matches any markdown image whose source is a `data:image/...;base64,...` URI:
 ## Use
 
 - Open a note that contains base64 images.
-- Run command (Ctrl/Cmd+P): **Clean base64 images in current note**.
-- All matches in that note are replaced/deleted in a single editor transaction.
-- **Ctrl/Cmd+Z restores the original content** in one step (and Ctrl/Cmd+Shift+Z redoes it).
+- Run the command (Ctrl/Cmd+P): **Clean base64 images in current note**.
+- Or enable **auto-clean on paste** in settings to process images automatically when pasted.
+- All matches are replaced/deleted in a single editor transaction.
+- **Ctrl/Cmd+Z restores the original content** in one step.
+
+![demo](demo.gif)
 
 ## Modes
 
-- **Replace with text** — Swaps each base64 image with placeholder text (customizable). Optionally includes the alt text and trailing text in the replacement.
+### Command Modes (run via Ctrl/Cmd+P)
+- **Replace with text** — Swaps each base64 image with customizable placeholder text. Optionally keeps the alt text and trailing text in the replacement.
 - **Delete entirely** — Removes base64 images completely.
-- **Image Shrink** — Downscales and compresses the image, keeping it inline as a smaller base64. Choose between medium (128px) and icon (32px) presets.
+- **Image Shrink** — Downscales and compresses the image inline as a smaller base64. Choose between medium (128 px) and icon (32 px) presets.
 - **Save to file** — Decodes the image, saves it to disk, and replaces the base64 with a wiki-link. Configurable save location (Obsidian default, subfolder next to note, or custom path).
+
+### Toggle Settings (always active when enabled)
+- **Collapse base64 in editor** — Visually hides base64 data in Source / Live Preview mode, replacing it with a compact pill, e.g. `[alt — base64 png (3,674 chars)]`. Place your cursor on it to reveal the full text. Does not modify the file.
+- **Trigger mode** — Choose between running the clean command manually (Ctrl/Cmd+P) or having it run automatically whenever you paste content into the editor.
+
 
 ## Why no "clean entire vault" command?
 

@@ -1,6 +1,8 @@
 'use strict';
 
-const { Plugin, PluginSettingTab, Setting, Notice } = require('obsidian');
+const { Plugin, PluginSettingTab, Setting, Notice, MarkdownView } = require('obsidian');
+const { ViewPlugin, Decoration, WidgetType } = require('@codemirror/view');
+const { RangeSetBuilder } = require('@codemirror/state');
 
 // ---------------------------------------------------------------------------
 // Regex
@@ -15,6 +17,10 @@ function buildRegex() {
 
 // Secondary regex to extract format + raw base64 from a match string.
 const DATA_URI_RE = /data:image\/([a-z]+);base64,([a-zA-Z0-9+\/]+={0,2})/;
+
+// Regex for the collapse ViewPlugin — captures (1) alt, (2) format, (3) payload.
+const COLLAPSE_REGEX_SOURCE =
+    String.raw`!\[([^\]]*)\]\(data:image\/([a-z]+);base64,([a-zA-Z0-9+\/]+={0,2})\)`;
 
 // ---------------------------------------------------------------------------
 // Utility functions
@@ -58,6 +64,88 @@ function escapeRegex(str) {
     return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// ---------------------------------------------------------------------------
+// CM6 collapse extension
+// ---------------------------------------------------------------------------
+
+class Base64CollapseWidget extends WidgetType {
+    constructor(format, charCount, altText) {
+        super();
+        this.format = format;
+        this.charCount = charCount;
+        this.altText = altText;
+    }
+
+    toDOM() {
+        const span = document.createElement('span');
+        span.className = 'b64-collapse-widget';
+        const label = this.altText
+            ? `${this.altText} -- base64 ${this.format}`
+            : `base64 ${this.format}`;
+        span.textContent = `[${label} (${this.charCount.toLocaleString()} chars)]`;
+        span.title = `Base64-embedded ${this.format} image, ${this.charCount.toLocaleString()} characters`;
+        return span;
+    }
+
+    eq(other) {
+        return this.format === other.format
+            && this.charCount === other.charCount
+            && this.altText === other.altText;
+    }
+}
+
+function buildCollapsePlugin(pluginRef) {
+    return ViewPlugin.fromClass(
+        class {
+            constructor(view) {
+                this.decorations = this.buildDecorations(view);
+            }
+
+            update(update) {
+                if (update.docChanged || update.selectionSet || update.viewportChanged) {
+                    this.decorations = this.buildDecorations(update.view);
+                }
+            }
+
+            buildDecorations(view) {
+                if (!pluginRef.settings.collapseInEditor) {
+                    return Decoration.none;
+                }
+
+                const builder = new RangeSetBuilder();
+                const cursors = view.state.selection.ranges;
+
+                for (const { from, to } of view.visibleRanges) {
+                    const text = view.state.doc.sliceString(from, to);
+                    const regex = new RegExp(COLLAPSE_REGEX_SOURCE, 'g');
+                    let match;
+
+                    while ((match = regex.exec(text)) !== null) {
+                        const matchFrom = from + match.index;
+                        const matchTo = matchFrom + match[0].length;
+
+                        // Skip if any cursor/selection overlaps — reveals full text
+                        const cursorInside = cursors.some(
+                            (sel) => sel.from < matchTo && sel.to > matchFrom
+                        );
+                        if (cursorInside) continue;
+
+                        const widget = new Base64CollapseWidget(
+                            match[2], match[0].length, match[1]
+                        );
+                        builder.add(matchFrom, matchTo, Decoration.replace({ widget }));
+                    }
+                }
+
+                return builder.finish();
+            }
+        },
+        { decorations: (v) => v.decorations }
+    );
+}
+
+// ---------------------------------------------------------------------------
+
 function trailingTextLength(content, matchEnd, altText) {
     if (!altText) return 0;
     const after = content.substring(matchEnd);
@@ -95,7 +183,9 @@ async function ensureFolderExists(vault, folderPath) {
 // ---------------------------------------------------------------------------
 
 const DEFAULT_SETTINGS = {
-    mode: 'replace',              // 'replace' | 'delete' | 'convert' | 'save'
+    collapseInEditor: false,      // visual collapse toggle (independent of mode)
+    triggerMode: 'command',       // 'command' | 'paste'
+    mode: 'none',                 // 'none' | 'replace' | 'delete' | 'convert' | 'save'
     replaceUseCustom: false,
     replacementText: '\\[Image Removed]',
     replaceIncludeInfo: true,
@@ -123,6 +213,13 @@ class Base64ImageCleanerPlugin extends Plugin {
     async onload() {
         await this.loadSettings();
 
+        this._editorExtensions = [];
+        this._pasteEventRef = null;
+        this.registerEditorExtension(this._editorExtensions);
+        this._updateCollapseExtension();
+        this._updatePasteHandler();
+        console.log('[Base64 Image Cleaner] loaded. ViewPlugin:', typeof ViewPlugin, 'collapseInEditor:', this.settings.collapseInEditor);
+
         this.addCommand({
             id: 'clean-current-note',
             name: 'Clean base64 images in current note',
@@ -132,6 +229,13 @@ class Base64ImageCleanerPlugin extends Plugin {
         });
 
         this.addSettingTab(new Base64ImageCleanerSettingTab(this.app, this));
+    }
+
+    onunload() {
+        if (this._pasteEventRef) {
+            this.app.workspace.offref(this._pasteEventRef);
+            this._pasteEventRef = null;
+        }
     }
 
     async loadSettings() {
@@ -153,7 +257,7 @@ class Base64ImageCleanerPlugin extends Plugin {
         const mode = this.settings.mode;
         if (!this.presets[mode]) this.presets[mode] = {};
         const differs = Object.keys(DEFAULT_SETTINGS).some(
-            (k) => k !== 'mode' && this.settings[k] !== DEFAULT_SETTINGS[k]
+            (k) => k !== 'mode' && k !== 'triggerMode' && this.settings[k] !== DEFAULT_SETTINGS[k]
         );
         if (differs) {
             this.presets[mode]['recent - auto saved'] = Object.assign({}, this.settings);
@@ -172,16 +276,46 @@ class Base64ImageCleanerPlugin extends Plugin {
     async loadPreset(name) {
         const mode = this.settings.mode;
         if (!this.presets[mode]?.[name]) return;
+        const triggerMode = this.settings.triggerMode;
         this.settings = Object.assign({}, DEFAULT_SETTINGS, this.presets[mode][name]);
         this.settings.mode = mode;
+        this.settings.triggerMode = triggerMode;
         await this.saveSettings();
     }
 
     async revertToDefaults() {
         const mode = this.settings.mode;
+        const triggerMode = this.settings.triggerMode;
         this.settings = Object.assign({}, DEFAULT_SETTINGS);
         this.settings.mode = mode;
+        this.settings.triggerMode = triggerMode;
         await this.saveSettings();
+    }
+
+    _updateCollapseExtension() {
+        this._editorExtensions.length = 0;
+        if (this.settings.collapseInEditor) {
+            this._editorExtensions.push(buildCollapsePlugin(this));
+        }
+        this.app.workspace.updateOptions();
+    }
+
+    _updatePasteHandler() {
+        if (this._pasteEventRef) {
+            this.app.workspace.offref(this._pasteEventRef);
+            this._pasteEventRef = null;
+        }
+        if (this.settings.triggerMode === 'paste') {
+            this._pasteEventRef = this.app.workspace.on(
+                'editor-paste',
+                (evt, editor, markdownView) => {
+                    if (this.settings.mode === 'none') return;
+                    setTimeout(() => {
+                        this.cleanEditor(editor, markdownView, { silent: true });
+                    }, 150);
+                }
+            );
+        }
     }
 
     getReplacementText() {
@@ -221,23 +355,27 @@ class Base64ImageCleanerPlugin extends Plugin {
         return '';
     }
 
-    async cleanEditor(editor, view) {
+    async cleanEditor(editor, view, { silent = false } = {}) {
         const content = editor.getValue();
         const matches = [...content.matchAll(buildRegex())];
 
         if (matches.length === 0) {
-            new Notice('No base64 images found in this note.');
+            if (!silent) new Notice('No base64 images found in this note.');
             return;
         }
 
         const mode = this.settings.mode;
+        if (mode === 'none') {
+            if (!silent) new Notice('No processing mode selected. Choose a mode in settings to clean images.');
+            return;
+        }
         const cleanTrailing = this.settings.cleanTrailing;
         const suffix = this.settings.suffixText;
         const logosOnly = this.settings.shrinkTarget === 'logos';
         const targetMatches = logosOnly ? matches.filter(m => m[1]) : matches;
 
         if (targetMatches.length === 0) {
-            new Notice('No base64 images matched the target filter (logos only).');
+            if (!silent) new Notice('No base64 images matched the target filter (logos only).');
             return;
         }
 
@@ -423,11 +561,54 @@ class Base64ImageCleanerSettingTab extends PluginSettingTab {
 
         containerEl.createEl('h2', { text: 'Base64 Image Cleaner' });
 
+        // ---- Collapse toggle (independent of mode) ----
+        new Setting(containerEl)
+            .setName('Collapse base64 in editor')
+            .setDesc(
+                'Visually collapse base64 image data in Source and Live Preview modes. '
+                + 'Does not modify the file. Place cursor on collapsed text to reveal it.'
+            )
+            .addToggle((toggle) =>
+                toggle
+                    .setValue(this.plugin.settings.collapseInEditor)
+                    .onChange(async (value) => {
+                        this.plugin.settings.collapseInEditor = value;
+                        if (!value && this.plugin.settings.mode === 'none') {
+                            this.plugin.settings.mode = 'replace';
+                        }
+                        await this.plugin.saveSettings();
+                        this.plugin._updateCollapseExtension();
+                        this.display();
+                    })
+            );
+
+        // ---- Trigger mode ----
+        new Setting(containerEl)
+            .setName('Trigger mode')
+            .setDesc(
+                'Command: clean only when you run the command (Ctrl/Cmd+P). '
+                + 'Paste: automatically clean whenever you paste into the editor.'
+            )
+            .addDropdown((dd) =>
+                dd
+                    .addOption('command', 'Command only (Ctrl/Cmd+P)')
+                    .addOption('paste', 'Auto-clean on paste')
+                    .setValue(this.plugin.settings.triggerMode)
+                    .onChange(async (value) => {
+                        this.plugin.settings.triggerMode = value;
+                        await this.plugin.saveSettings();
+                        this.plugin._updatePasteHandler();
+                    })
+            );
+
         // ---- Mode selector (always visible) ----
         new Setting(containerEl)
             .setName('Mode')
-            .setDesc('What to do with each base64 image found in the note.')
-            .addDropdown((dd) =>
+            .setDesc('What to do with each base64 image when you run the clean command.')
+            .addDropdown((dd) => {
+                if (this.plugin.settings.collapseInEditor) {
+                    dd.addOption('none', 'None (use CSS only - to visually hide the mess)');
+                }
                 dd
                     .addOption('replace', 'Replace with text')
                     .addOption('delete', 'Delete entirely')
@@ -438,8 +619,8 @@ class Base64ImageCleanerSettingTab extends PluginSettingTab {
                         this.plugin.settings.mode = value;
                         await this.plugin.saveSettings();
                         this.display();
-                    })
-            );
+                    });
+            });
 
         // ---- Global: trailing text cleanup ----
         new Setting(containerEl)
