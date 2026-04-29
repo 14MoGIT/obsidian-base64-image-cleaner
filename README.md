@@ -2,6 +2,8 @@
 
 An Obsidian plugin that finds inline base64-embedded images in the current note and lets you replace, delete, shrink, or save them to file — with full undo support.
 
+![demo](demo.gif)
+
 Matches any markdown image whose source is a `data:image/...;base64,...` URI:
 
 ```
@@ -30,8 +32,6 @@ Matches any markdown image whose source is a `data:image/...;base64,...` URI:
 - Or enable **auto-clean on paste** in settings to process images automatically when pasted.
 - All matches are replaced/deleted in a single editor transaction.
 - **Ctrl/Cmd+Z restores the original content** in one step.
-
-![demo](demo.gif)
 
 ## Modes
 
