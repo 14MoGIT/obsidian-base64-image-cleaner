@@ -1,5 +1,7 @@
 # Base64 Image Cleaner
 
+![Demo](demo.gif)
+
 An Obsidian plugin that finds inline base64-embedded images in the current note and either replaces them with placeholder text or deletes them entirely.
 
 Matches any markdown image whose source is a `data:image/...;base64,...` URI:
